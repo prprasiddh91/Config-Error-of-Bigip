@@ -1,0 +1,95 @@
+#!/usr/bin/env python
+import sys,os,re,requests
+sys.path.insert(0, '/var/www/cgi-bin/')
+import csv,re
+from netaddr import *
+from datetime import datetime
+
+
+EMAILSUBJECT=Test ticket
+IM_ASSIGNMENTGROUP={assignment_group}
+IM_PRIORITY={priority}
+IM_AFFECTEDCI={ci_name}
+IM_TITLE={title}
+IM_TICKETDUPSTRING={dupstring}
+HOSTNAME={ci_name}
+
+csvData =[['bigip','ssl_profile_name',"cert_name",'default_profile_name','san_names','expiry','serial_number',"client_or_server_side","subject","issuer"]]
+finalcertinfo=[]
+class Certinfo (object):
+    def __init__ (self,device):
+        self.bigip=bigip
+        self.deaddevices=[]
+        self.certdict={}
+        self.notification=90
+        self.renewal=14
+        self.wildcardcis=21
+
+
+    def bigip_get_cert_info(self):
+        try:
+            ssh=Remote_connect_ssh(bigip)
+            certresult=ssh.execute_commands("tmsh -q -c 'cd /;list sys file ssl-cert recursive one-line'")
+            ssh.close_connection()
+            if certresult[0]:
+                self.certresult=certresult[0].split("\n")
+                self.certresult=filter(None,self.certresult)
+                for line in self.certresult:
+                    certname= re.search(r"ssl-cert (.*?)(?= )",line).group(1)
+                    certname=certname.split("/")[-1].replace("\\","")
+                    if re.search(r"serial-number (.*?)(?= )",line):
+                        serial=re.search(r"serial-number (.*?)(?= )",line).group(1)
+                    else:
+                        serial=""
+                    #get SAN names
+                    if re.findall(r'DNS:(.+?(?= |\"))',line):
+                        san=re.findall(r'DNS:(.+?(?= |\"))',line)
+                    else:
+                        san=[]
+                    san=[s.rstrip(",") for s in san]
+                    san.sort()
+                    san=",".join(san)
+                    #get expiry
+                    if re.search(r"expiration-string \"(.+?(?=\"))",line):
+                        expiry=re.search(r"expiration-string \"(.+?(?=\"))",line).group(1)
+                    else:
+                        expiry=""
+                    issuer=re.search(r'issuer \"(.+?(?=\"))',line).group(1) if re.search(r'issuer \"(.+?(?=\"))',line) else ""
+                    subject=re.search(r'subject \"(.+?(?=\"))',line).group(1) if re.search(r'subject \"(.+?(?=\"))',line) else ""
+                    #build dictionary
+                    self.certdict[certname]={"expiry":expiry,"san":san,"serial":serial,"issuer":issuer,"subject":subject}
+            else:
+                self.deaddevices.append(self.bigip)
+            self.skip="no"
+        except Exception as e:
+            print e
+            exc_type, exc_obj, exc_tb = sys.exc_info()
+            fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
+            print(exc_type, fname, exc_tb.tb_lineno)
+            self.skip="yes"
+            self.deaddevices.append(self.bigip)
+
+
+{messages}
+""".format(assignment_group=assignment_group,priority=priority,ci_name=ci_name,dupstring=dupstring,messages=messages,title=title)
+    emailalert(  confval['ALERTPARSER'],"subject", body,type="plain")
+    #emailalert(  "fxallnetworks@refinitiv.com","subject", body, bcc="prasiddh.rpai@refinitiv.com",type="plain")
+    #confval['ALERTPARSER'],
+
+#open up CSV file to get all serivces names
+bigip_status_dict=[]
+with open(confval['BIGIPSTATUSCSV'], mode='r') as csvfile:
+    reader=csv.DictReader(csvfile)
+    for row in reader:
+        bigip_status_dict.append(row)
+
+
+for bigip_status in bigip_status_dict:
+    if "Expried or soon expired cert installed" in bigip_status['VIP config error']:
+        messages="""
+        VIP {vip} on {bigipname} has an expired or soon expired cert applied
+        We should not have any of these sort of certs applied on our Load balancers
+        Please either renew the cert or work with the BU to remove the VIP.
+        If both are not possible, consider applying a self signed certificate.
+        """.format(vip=bigip_status['IP:Port'],bigipname=bigip_status['Load Balancer'])
+        open_inc_tickets(confval['FLSSNOWGROUP'],"2",bigip_status['Load Balancer'],bigip_status['IP:Port']+bigip_status['Load Balancer']+bigip_status['VIP config error'],messages,bigip_status['IP:Port']+" "+bigip_status['VIP config error'])
